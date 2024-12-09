@@ -1,0 +1,89 @@
+name: Fetch README and Images
+
+on:
+  push:
+    branches: [ main ]
+  schedule:
+    - cron: '0 0 * * *'  # Daily at midnight UTC
+  workflow_dispatch:
+
+
+jobs:
+  fetch-readme:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Fetch README and Images
+        run: |
+          REPO_URL=$(node -p "require('./docs.config.json').repositoryURL")
+          OWNER=$(echo $REPO_URL | sed 's/https:\/\/github.com\///' | cut -d'/' -f1)
+          REPO=$(echo $REPO_URL | sed 's/https:\/\/github.com\///' | cut -d'/' -f2)
+          
+          mkdir -p public/readme-assets
+          
+          README_CONTENT=$(curl -H "Accept: application/vnd.github.v3.raw" \
+            "https://api.github.com/repos/$OWNER/$REPO/contents/README.md")
+          
+          echo "$README_CONTENT" > public/readme.md
+          
+          TEMP_README=$(mktemp)
+          echo "$README_CONTENT" > "$TEMP_README"
+          
+          # Process markdown image syntax ![alt](path)
+          while IFS= read -r line; do
+            if [[ $line =~ !\[.*\]\((.*?)\) ]]; then
+              IMG_PATH="${BASH_REMATCH[1]}"
+              if [[ $IMG_PATH != http* ]]; then
+                # Remove leading slash if present
+                IMG_PATH=${IMG_PATH#/}
+                mkdir -p "public/readme-assets/$(dirname "$IMG_PATH")"
+                
+                curl -H "Accept: application/vnd.github.v3.raw" \
+                  "https://raw.githubusercontent.com/$OWNER/$REPO/main/$IMG_PATH" \
+                  --create-dirs -o "public/readme-assets/$IMG_PATH"
+                
+                # Don't modify the path in the markdown
+                line=${line//$IMG_PATH/$IMG_PATH}
+              fi
+            fi
+            echo "$line" >> "$TEMP_README.new"
+          done < "$TEMP_README"
+
+          mv "$TEMP_README.new" "$TEMP_README"
+
+          # Process HTML image syntax <img src="path" />
+          while IFS= read -r line; do
+            if [[ $line =~ \<img.*src=\"([^\"]+)\" ]]; then
+              IMG_PATH="${BASH_REMATCH[1]}"
+              if [[ $IMG_PATH != http* ]]; then
+                # Remove leading slash if present
+                IMG_PATH=${IMG_PATH#/}
+                mkdir -p "public/readme-assets/$(dirname "$IMG_PATH")"
+                
+                curl -H "Accept: application/vnd.github.v3.raw" \
+                  "https://raw.githubusercontent.com/$OWNER/$REPO/main/$IMG_PATH" \
+                  --create-dirs -o "public/readme-assets/$IMG_PATH"
+                
+                # Don't modify the path in the markdown
+                line=${line//$IMG_PATH/$IMG_PATH}
+              fi
+            fi
+            echo "$line" >> "$TEMP_README.new"
+          done < "$TEMP_README"
+          
+          mv "$TEMP_README.new" public/readme.md
+          
+          rm "$TEMP_README"
+          
+      - name: Commit and push if changed
+        run: |
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+          git add public/readme.md public/readme-assets
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Update README content and assets" && git push)
